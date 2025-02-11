@@ -1,3 +1,6 @@
+*.model
+*.bin
+
 # Created by https://www.toptal.com/developers/gitignore/api/pycharm,visualstudio,python,jupyternotebooks
 # Edit at https://www.toptal.com/developers/gitignore?templates=pycharm,visualstudio,python,jupyternotebooks
 
