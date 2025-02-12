@@ -36,18 +36,18 @@ def load_model_and_tokenizer():
 
     tokenizer = LlamaTokenizer.from_pretrained(model_path)
 
-    # Create processor with explicit patch size
+    # Create processor with consistent configuration
     processor = LlavaProcessor(
         image_processor=image_processor,
         tokenizer=tokenizer,
         feature_extractor=image_processor,
-        patch_size=14,  # Explicitly set patch size
-        vision_config={  # Add vision configuration
-            "image_size": 224,
-            "patch_size": 14,
-            "num_channels": 3,
-        },
     )
+
+    # Set consistent patch size
+    processor.config = {"image_size": 336, "patch_size": 14, "num_channels": 3}
+
+    processor.vision_config = processor.config
+    processor.patch_size = 14
 
     # Set patch size attribute directly
     setattr(processor, "patch_size", 14)
@@ -92,6 +92,7 @@ def generate_response(model, processor, image, prompt):
             **inputs,
             max_new_tokens=512,
             num_beams=3,
+            do_sample=True,
             temperature=0.7,
         )
 
