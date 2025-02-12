@@ -1,5 +1,5 @@
 {
-    "image_size": 224,
+    "image_size": 336,
     "image_mean": [
         0.485,
         0.456,

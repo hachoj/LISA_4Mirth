@@ -21,27 +21,36 @@ def load_model_and_tokenizer():
     # Create configuration for image processor
     image_processor_config = {
         "do_resize": True,
-        "size": 224,
+        "size": {"height": 336, "width": 336},
         "do_center_crop": True,
-        "crop_size": 224,
+        "crop_size": {"height": 336, "width": 336},
         "do_normalize": True,
         "image_mean": [0.48145466, 0.4578275, 0.40821073],
         "image_std": [0.26862954, 0.26130258, 0.27577711],
-        "patch_size": 14,
     }
 
-    # Initialize image processor with config
-    image_processor = CLIPImageProcessor(**image_processor_config)
+    # Initialize components
+    image_processor = CLIPImageProcessor.from_pretrained(
+        "openai/clip-vit-large-patch14", **image_processor_config
+    )
 
-    # Initialize tokenizer
     tokenizer = LlamaTokenizer.from_pretrained(model_path)
 
-    # Create processor with config
+    # Create processor with explicit patch size
     processor = LlavaProcessor(
         image_processor=image_processor,
         tokenizer=tokenizer,
-        feature_extractor=image_processor,  # Add this line
+        feature_extractor=image_processor,
+        patch_size=14,  # Explicitly set patch size
+        vision_config={  # Add vision configuration
+            "image_size": 224,
+            "patch_size": 14,
+            "num_channels": 3,
+        },
     )
+
+    # Set patch size attribute directly
+    setattr(processor, "patch_size", 14)
 
     # Load model with optimized settings
     model = LlavaForConditionalGeneration.from_pretrained(
