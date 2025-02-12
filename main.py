@@ -6,6 +6,8 @@ from transformers import (
     LlavaProcessor,
     LlavaForConditionalGeneration,
     BitsAndBytesConfig,
+    CLIPImageProcessor,
+    LlamaTokenizer,
 )
 from PIL import Image
 import requests
@@ -16,13 +18,34 @@ def load_model_and_tokenizer():
     """Load LISA++ model and tokenizer with optimized settings for 3060"""
     model_path = "LISA_Plus_7b"
 
-    # Initialize processor
-    processor = LlavaProcessor.from_pretrained(model_path)
+    # Create configuration for image processor
+    image_processor_config = {
+        "do_resize": True,
+        "size": 224,
+        "do_center_crop": True,
+        "crop_size": 224,
+        "do_normalize": True,
+        "image_mean": [0.48145466, 0.4578275, 0.40821073],
+        "image_std": [0.26862954, 0.26130258, 0.27577711],
+        "patch_size": 14,
+    }
 
-    # Load model with optimized settings for 12GB VRAM
+    # Initialize image processor with config
+    image_processor = CLIPImageProcessor(**image_processor_config)
+
+    # Initialize tokenizer
+    tokenizer = LlamaTokenizer.from_pretrained(model_path)
+
+    # Create processor with config
+    processor = LlavaProcessor(
+        image_processor=image_processor,
+        tokenizer=tokenizer,
+        feature_extractor=image_processor,  # Add this line
+    )
+
+    # Load model with optimized settings
     model = LlavaForConditionalGeneration.from_pretrained(
         model_path,
-        load_in_4bit=True,
         device_map="auto",
         torch_dtype=torch.float16,
         quantization_config=BitsAndBytesConfig(
@@ -31,7 +54,6 @@ def load_model_and_tokenizer():
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
         ),
-        max_memory={0: "11GB"},  # Reserve 1GB for system
     )
 
     return model, processor
@@ -48,11 +70,14 @@ def process_image(image_path):
 
 
 def generate_response(model, processor, image, prompt):
-    """Generate response from LISA++"""
-    # Prepare inputs using processor
-    inputs = processor(images=image, text=prompt, return_tensors="pt").to(model.device)
+    """Generate response from LISA model"""
+    # Prepare inputs
+    inputs = processor(images=image, text=prompt, return_tensors="pt", padding=True)
 
-    # Generate response
+    # Move inputs to same device as model
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    # Generate
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
