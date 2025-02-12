@@ -1,0 +1,12 @@
+{
+"bos_token_id": 1,
+"eos_token_id": 2,
+"max_length": 4096,
+"out_dim": 256,
+"pad_token_id": 0,
+"seg_token_idx": 32000,
+"train_mask_decoder": true,
+"transformers_version": "4.31.0",
+"vision_tower": "openai/clip-vit-large-patch14-336"
+}
+
