@@ -15,8 +15,34 @@ from io import BytesIO
 
 
 def load_model_and_tokenizer():
-    """Load LISA++ model and tokenizer with optimized settings for 3060"""
     model_path = "LISA_Plus_7b"
+
+    # Initialize tokenizer with existing special tokens
+    tokenizer = LlamaTokenizer.from_pretrained(model_path)
+
+    # Add image-specific tokens without modifying existing ones
+    new_tokens = {
+        "im_start": "<im_start>",
+        "im_end": "<im_end>",
+        "image_token": "<image>",
+    }
+
+    # Add new tokens while preserving existing configuration
+    num_added = tokenizer.add_tokens(
+        [token for token in new_tokens.values()], special_tokens=True
+    )
+
+    # Keep existing special token mapping
+    special_tokens = {
+        "bos_token": "<s>",
+        "eos_token": "</s>",
+        "unk_token": "<unk>",
+        "pad_token": "<unk>",  # Using unk as pad per special_tokens_map.json
+    }
+
+    # Update tokenizer configuration
+    tokenizer.padding_side = "right"
+    tokenizer.model_max_length = 3072
 
     # Create configuration for image processor
     image_processor_config = {
@@ -43,14 +69,17 @@ def load_model_and_tokenizer():
         feature_extractor=image_processor,
     )
 
-    # Set consistent patch size
-    processor.config = {"image_size": 336, "patch_size": 14, "num_channels": 3}
+    # Set vision configuration
+    vision_config = {
+        "image_size": 336,
+        "patch_size": 14,
+        "num_channels": 3,
+        "num_patches": (336 // 14) ** 2,  # Calculate expected number of patches
+    }
 
-    processor.vision_config = processor.config
+    processor.config = vision_config
+    processor.vision_config = vision_config
     processor.patch_size = 14
-
-    # Set patch size attribute directly
-    setattr(processor, "patch_size", 14)
 
     # Load model with optimized settings
     model = LlavaForConditionalGeneration.from_pretrained(
@@ -64,6 +93,9 @@ def load_model_and_tokenizer():
             bnb_4bit_use_double_quant=True,
         ),
     )
+
+    # Resize token embeddings to account for new special tokens
+    model.resize_token_embeddings(len(tokenizer))
 
     return model, processor
 
@@ -92,7 +124,6 @@ def generate_response(model, processor, image, prompt):
             **inputs,
             max_new_tokens=512,
             num_beams=3,
-            do_sample=True,
             temperature=0.7,
         )
 
