@@ -1,0 +1,7 @@
+name: LISA
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - ipykernel
+prefix: /Users/harrisonchojnowski/miniforge3/envs/LISA
