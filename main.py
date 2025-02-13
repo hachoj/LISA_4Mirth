@@ -112,12 +112,19 @@ def process_image(image_path):
 def generate_response(model, processor, image, prompt):
     """Generate response from LISA model"""
     # Format prompt with image tokens
-    formatted_prompt = f"<im_start>{prompt}<im_end>"
+    formatted_prompt = f"<image>What is shown in this image? {prompt}"
 
     # Prepare inputs
     inputs = processor(
-        images=image, text=formatted_prompt, return_tensors="pt", padding=True
+        images=image,
+        text=formatted_prompt,
+        return_tensors="pt",
+        padding=True,
+        do_sample=True,  # Enable sampling for temperature
     )
+
+    # Move inputs to GPU
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
     # Generate
     with torch.no_grad():
@@ -125,6 +132,7 @@ def generate_response(model, processor, image, prompt):
             **inputs,
             max_new_tokens=512,
             num_beams=3,
+            do_sample=True,  # Enable sampling
             temperature=0.7,
         )
 
@@ -138,7 +146,7 @@ def main():
 
     # Example usage
     image_path = "coco2017/test2017/000000000001.jpg"
-    prompt = "What objects can you see in this image?"
+    prompt = "Who are you?"
 
     # Process image
     image = process_image(image_path)
