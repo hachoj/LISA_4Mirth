@@ -27,18 +27,19 @@ def load_model_and_tokenizer():
         "image_token": "<image>",
     }
 
-    # Add new tokens while preserving existing configuration
-    num_added = tokenizer.add_tokens(
-        [token for token in new_tokens.values()], special_tokens=True
-    )
-
-    # Keep existing special token mapping
+    # Keep existing special token mapping and add it to tokenizer
     special_tokens = {
         "bos_token": "<s>",
         "eos_token": "</s>",
         "unk_token": "<unk>",
         "pad_token": "<unk>",  # Using unk as pad per special_tokens_map.json
     }
+    tokenizer.add_special_tokens(special_tokens)  # Add this line
+
+    # Add new tokens while preserving existing configuration
+    num_added = tokenizer.add_tokens(
+        [token for token in new_tokens.values()], special_tokens=True
+    )
 
     # Update tokenizer configuration
     tokenizer.padding_side = "right"
@@ -59,8 +60,6 @@ def load_model_and_tokenizer():
     image_processor = CLIPImageProcessor.from_pretrained(
         "openai/clip-vit-large-patch14", **image_processor_config
     )
-
-    tokenizer = LlamaTokenizer.from_pretrained(model_path)
 
     # Create processor with consistent configuration
     processor = LlavaProcessor(
@@ -112,11 +111,13 @@ def process_image(image_path):
 
 def generate_response(model, processor, image, prompt):
     """Generate response from LISA model"""
-    # Prepare inputs
-    inputs = processor(images=image, text=prompt, return_tensors="pt", padding=True)
+    # Format prompt with image tokens
+    formatted_prompt = f"<im_start>{prompt}<im_end>"
 
-    # Move inputs to same device as model
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    # Prepare inputs
+    inputs = processor(
+        images=image, text=formatted_prompt, return_tensors="pt", padding=True
+    )
 
     # Generate
     with torch.no_grad():
