@@ -9,7 +9,7 @@ import gradio as gr
 import numpy as np
 import torch
 import torch.nn.functional as F
-from datasets import load_dataset
+from datasets import load_from_disk 
 from PIL import Image
 from transformers import (
     Trainer,
@@ -52,8 +52,9 @@ CUDA_VISIBLE_DEVICES=0 python fine_tune.py --version 'xinlai/LISA-13B-llama2-v1'
 #########################################
 
 # These settings are now hard-coded instead of provided via command-line.
-TRAIN_DATASET = "some_dataset"  # Replace with your actual training dataset name or path.
-EVAL_DATASET = "some_dataset"   # Replace with your actual evaluation dataset name or path.
+dataset_dict = load_from_disk("med_data_datasets/processed_kvasir_seg_dataset")
+TRAIN_DATASET = dataset_dict["train"]
+VAL_DATASET = dataset_dict["validation"]
 NUM_TRAIN_EPOCHS = 3
 PER_DEVICE_TRAIN_BATCH_SIZE = 1
 PER_DEVICE_EVAL_BATCH_SIZE = 2
@@ -93,138 +94,167 @@ def parse_args(args):
     )
     return parser.parse_args(args)
 
+# #########################################
+# #         Preprocessing Function        #
+# #########################################
+
+# def preprocess(
+#     x,
+#     pixel_mean=torch.Tensor([123.675, 116.28, 103.53]).view(-1, 1, 1),
+#     pixel_std=torch.Tensor([58.395, 57.12, 57.375]).view(-1, 1, 1),
+#     img_size=1024,
+# ) -> torch.Tensor:
+#     """Normalize pixel values and pad to a square input."""
+#     # Normalize colors
+#     x = (x - pixel_mean) / pixel_std
+#     # Pad
+#     h, w = x.shape[-2:]
+#     padh = img_size - h
+#     padw = img_size - w
+#     x = F.pad(x, (0, padw, 0, padh))
+#     return x
+
 #########################################
-#         Preprocessing Function        #
+#               Trainer                 #
 #########################################
 
-def preprocess(
-    x,
-    pixel_mean=torch.Tensor([123.675, 116.28, 103.53]).view(-1, 1, 1),
-    pixel_std=torch.Tensor([58.395, 57.12, 57.375]).view(-1, 1, 1),
-    img_size=1024,
-) -> torch.Tensor:
-    """Normalize pixel values and pad to a square input."""
-    # Normalize colors
-    x = (x - pixel_mean) / pixel_std
-    # Pad
-    h, w = x.shape[-2:]
-    padh = img_size - h
-    padw = img_size - w
-    x = F.pad(x, (0, padw, 0, padh))
-    return x
+class CustomTrainer(Trainer):
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        Custom loss computation.
+        This example assumes:
+          - `inputs` contains "labels" for the text.
+          - The model returns an output object with `logits` (for text) and optionally
+            `mask_logits` (for segmentation).
+          - You want to compute the cross-entropy loss only for tokens after the [SEG] token.
+        """
+        outputs = model(**inputs)
+        print(outputs)
+        import sys
+        sys.exit(0)
+        
 
-#########################################
-#         Inference Function            #
-#########################################
+        text_loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), ignore_index=-100)
+        
+        # Compute segmentation mask loss
+        mask_logits = outputs.get("mask_logits")  # e.g., shape: [batch_size, num_classes, H, W]
+        mask_labels = inputs.get("mask_labels")    # e.g., shape: [batch_size, H, W]
+        # Using binary cross entropy as an example; customize as needed:
+        mask_loss = F.binary_cross_entropy_with_logits(mask_logits.float(), mask_labels.float())
+        
+        # Combine losses (optionally add weights)
+        loss = text_loss + mask_loss
 
-def inference(input_str, input_image, args, model, tokenizer, clip_image_processor, transform):
-    ## filter out special chars
-    input_str = bleach.clean(input_str)
+        return (loss, outputs) if return_outputs else loss
 
-    print("input_str: ", input_str, "input_image: ", input_image)
+# def inference(input_str, input_image, args, model, tokenizer, clip_image_processor, transform):
+#     ## filter out special chars
+#     input_str = bleach.clean(input_str)
 
-    ## input valid check
-    if not re.match(r"^[A-Za-z ,.!?\'\"]+$", input_str) or len(input_str) < 1:
-        output_str = "[Error] Invalid input: ", input_str
-        # output_image = np.zeros((128, 128, 3))
-        ## error happened
-        output_image = cv2.imread("./resources/error_happened.png")[:, :, ::-1]
-        return output_image, output_str
+#     print("input_str: ", input_str, "input_image: ", input_image)
 
-    # Model Inference
-    conv = conversation_lib.conv_templates[args.conv_type].copy()
-    conv.messages = []
+#     ## input valid check
+#     if not re.match(r"^[A-Za-z ,.!?\'\"]+$", input_str) or len(input_str) < 1:
+#         output_str = "[Error] Invalid input: ", input_str
+#         # output_image = np.zeros((128, 128, 3))
+#         ## error happened
+#         output_image = cv2.imread("./resources/error_happened.png")[:, :, ::-1]
+#         return output_image, output_str
 
-    prompt = input_str
-    prompt = DEFAULT_IMAGE_TOKEN + "\n" + prompt
-    if args.use_mm_start_end:
-        replace_token = (
-            DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
-        )
-        prompt = prompt.replace(DEFAULT_IMAGE_TOKEN, replace_token)
+#     # Model Inference
+#     conv = conversation_lib.conv_templates[args.conv_type].copy()
+#     conv.messages = []
 
-    conv.append_message(conv.roles[0], prompt)
-    conv.append_message(conv.roles[1], "")
-    prompt = conv.get_prompt()
+#     prompt = input_str
+#     prompt = DEFAULT_IMAGE_TOKEN + "\n" + prompt
+#     if args.use_mm_start_end:
+#         replace_token = (
+#             DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+#         )
+#         prompt = prompt.replace(DEFAULT_IMAGE_TOKEN, replace_token)
 
-    image_np = cv2.imread(input_image)
-    image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
-    original_size_list = [image_np.shape[:2]]
+#     conv.append_message(conv.roles[0], prompt)
+#     conv.append_message(conv.roles[1], "")
+#     prompt = conv.get_prompt()
 
-    image_clip = (
-        clip_image_processor.preprocess(image_np, return_tensors="pt")["pixel_values"][
-            0
-        ]
-        .unsqueeze(0)
-        .cuda()
-    )
-    if args.precision == "bf16":
-        image_clip = image_clip.bfloat16()
-    elif args.precision == "fp16":
-        image_clip = image_clip.half()
-    else:
-        image_clip = image_clip.float()
+#     image_np = cv2.imread(input_image)
+#     image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+#     original_size_list = [image_np.shape[:2]]
 
-    image = transform.apply_image(image_np)
-    resize_list = [image.shape[:2]]
+#     image_clip = (
+#         clip_image_processor.preprocess(image_np, return_tensors="pt")["pixel_values"][
+#             0
+#         ]
+#         .unsqueeze(0)
+#         .cuda()
+#     )
+#     if args.precision == "bf16":
+#         image_clip = image_clip.bfloat16()
+#     elif args.precision == "fp16":
+#         image_clip = image_clip.half()
+#     else:
+#         image_clip = image_clip.float()
 
-    image = (
-        preprocess(torch.from_numpy(image).permute(2, 0, 1).contiguous())
-        .unsqueeze(0)
-        .cuda()
-    )
-    if args.precision == "bf16":
-        image = image.bfloat16()
-    elif args.precision == "fp16":
-        image = image.half()
-    else:
-        image = image.float()
+#     image = transform.apply_image(image_np)
+#     resize_list = [image.shape[:2]]
 
-    input_ids = tokenizer_image_token(prompt, tokenizer, return_tensors="pt")
-    input_ids = input_ids.unsqueeze(0).cuda()
+#     image = (
+#         preprocess(torch.from_numpy(image).permute(2, 0, 1).contiguous())
+#         .unsqueeze(0)
+#         .cuda()
+#     )
+#     if args.precision == "bf16":
+#         image = image.bfloat16()
+#     elif args.precision == "fp16":
+#         image = image.half()
+#     else:
+#         image = image.float()
 
-    output_ids, pred_masks = model.evaluate(
-        image_clip,
-        image,
-        input_ids,
-        resize_list,
-        original_size_list,
-        max_new_tokens=512,
-        tokenizer=tokenizer,
-    )
+#     input_ids = tokenizer_image_token(prompt, tokenizer, return_tensors="pt")
+#     input_ids = input_ids.unsqueeze(0).cuda()
 
-    output_ids = output_ids[0][output_ids[0] != IMAGE_TOKEN_INDEX]
+#     output_ids, pred_masks = model.evaluate(
+#         image_clip,
+#         image,
+#         input_ids,
+#         resize_list,
+#         original_size_list,
+#         max_new_tokens=512,
+#         tokenizer=tokenizer,
+#     )
+
+#     output_ids = output_ids[0][output_ids[0] != IMAGE_TOKEN_INDEX]
     
-    # output_ids are just the token ids for the text output
+#     # output_ids are just the token ids for the text output
 
-    text_output = tokenizer.decode(output_ids, skip_special_tokens=False)
-    text_output = text_output.replace("\n", "").replace("  ", " ")
-    text_output = text_output.split("ASSISTANT: ")[-1]
+#     text_output = tokenizer.decode(output_ids, skip_special_tokens=False)
+#     text_output = text_output.replace("\n", "").replace("  ", " ")
+#     text_output = text_output.split("ASSISTANT: ")[-1]
 
     
-    # THE OUTPUT IS A BINARY MASK NOT A POLYGON
+#     # THE OUTPUT IS A BINARY MASK NOT A POLYGON
 
-    save_img = None
-    for i, raw_pred_mask in enumerate(pred_masks):
-        if raw_pred_mask.shape[0] == 0:
-            continue
+#     save_img = None
+#     for i, raw_pred_mask in enumerate(pred_masks):
+#         if raw_pred_mask.shape[0] == 0:
+#             continue
 
-        raw_pred_mask = raw_pred_mask.detach().cpu().numpy()[0]
-        bin_pred_mask = raw_pred_mask > 0
+#         raw_pred_mask = raw_pred_mask.detach().cpu().numpy()[0]
+#         bin_pred_mask = raw_pred_mask > 0
 
-        save_img = image_np.copy()
-        save_img[bin_pred_mask] = (
-            image_np * 0.5
-            + bin_pred_mask[:, :, None].astype(np.uint8) * np.array([255, 0, 0]) * 0.5
-        )[bin_pred_mask]
+#         save_img = image_np.copy()
+#         save_img[bin_pred_mask] = (
+#             image_np * 0.5
+#             + bin_pred_mask[:, :, None].astype(np.uint8) * np.array([255, 0, 0]) * 0.5
+#         )[bin_pred_mask]
 
-    output_str = "ASSITANT: " + text_output  # input_str
-    if save_img is not None:
-        output_image = save_img  # input_image
-    else:
-        ## no seg output
-        output_image = cv2.imread("./resources/no_seg_out.png")[:, :, ::-1]
-    return output_image, output_str
+#     output_str = "ASSITANT: " + text_output  # input_str
+#     if save_img is not None:
+#         output_image = save_img  # input_image
+#     else:
+#         ## no seg output
+#         output_image = cv2.imread("./resources/no_seg_out.png")[:, :, ::-1]
+#     return output_image, output_str
 
 
 #########################################
@@ -334,37 +364,34 @@ def main():
     clip_image_processor = CLIPImageProcessor.from_pretrained(model.config.vision_tower)
     transform = ResizeLongestSide(args.image_size)
 
-    from datasets import load_from_disk
-
-    dataset_dict = load_from_disk("Processed_Med_Data/processed_kvasir_seg_dataset")
-    TRAIN_DATASET = dataset_dict["train"]
-    VAL_DATASET = dataset_dict["val"]
-
+    # Setup training arguments for Trainer.
     training_args = TrainingArguments(
-        output_dir="./checkpoints",  # Where to save checkpoints
-        evaluation_strategy="steps",  # Evaluate every few steps
-        per_device_train_batch_size=1,  # Training batch size per GPU
-        per_device_eval_batch_size=2,  # Evaluation batch size per GPU
-        gradient_accumulation_steps=16,  # Accumulate gradients to handle large models
-        logging_steps=50,  # Frequency of training logs
-        eval_steps=200,  # Frequency of evaluation
-        save_steps=200,  # Frequency of checkpoint saves
-        num_train_epochs=3,  # Total epochs to train
-        learning_rate=2e-5,  # Typical learning rate for large models
-        fp16=True,  # Mixed-precision for speed/memory
-        report_to="none",  # Disable online logging (e.g., WandB)
+        output_dir="./checkpoints/polyp_only",  # Where to save checkpoints
+        evaluation_strategy="steps",
+        per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
+        per_device_eval_batch_size=PER_DEVICE_EVAL_BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        logging_steps=50,
+        eval_steps=200,
+        save_steps=200,
+        num_train_epochs=NUM_TRAIN_EPOCHS,
+        learning_rate=LEARNING_RATE,
+        fp16=(args.precision == "fp16"),
+        report_to="none",
     )
 
-
-    trainer = Trainer(
+    # Initialize custom Trainer.
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=TRAIN_DATASET,
         eval_dataset=VAL_DATASET,
         data_collator=default_data_collator,
+        # tokenizer=tokenizer,
     )
 
-    trainer.train()
+    # Start training.
+    trainer.train()  
 
 if __name__ == '__main__':
     main()
