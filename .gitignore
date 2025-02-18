@@ -13,4 +13,6 @@ runs/
 Kvasir-SEG/Kvasir-SEG/bbox/*
 LISA_recreation_attempt/LISA_Plus_7b/*
 LISA_recreation_attempt/coco2017/*
-med_data/*
+unrefined_med_data/*
+processed_med_data/*
+med_data_datasets/*

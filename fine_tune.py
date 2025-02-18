@@ -43,16 +43,29 @@ from utils.utils import (
 )
     
 """
-CUDA_VISIBLE_DEVICES=0 python fine_tune.py --version 'xinlai/LISA-13B-llama2-v1' --load_in_4bit --do_train
+run script:
+CUDA_VISIBLE_DEVICES=0 python fine_tune.py --version 'xinlai/LISA-13B-llama2-v1' --load_in_4bit
 """
 
-# ------------------------------------------------------------------------------
-# Start of model creation
-# ------------------------------------------------------------------------------
+#########################################
+#     Fine-Tuning Configuration         #
+#########################################
 
+# These settings are now hard-coded instead of provided via command-line.
+TRAIN_DATASET = "some_dataset"  # Replace with your actual training dataset name or path.
+EVAL_DATASET = "some_dataset"   # Replace with your actual evaluation dataset name or path.
+NUM_TRAIN_EPOCHS = 3
+PER_DEVICE_TRAIN_BATCH_SIZE = 1
+PER_DEVICE_EVAL_BATCH_SIZE = 2
+GRADIENT_ACCUMULATION_STEPS = 16
+LEARNING_RATE = 2e-5
+
+#########################################
+#         Argument Parsing              #
+#########################################
 
 def parse_args(args):
-    parser = argparse.ArgumentParser(description="LISA chat")
+    parser = argparse.ArgumentParser(description="LISA Fine-Tuning Script")
     parser.add_argument("--version", default="xinlai/LISA-13B-llama2-v1")
     parser.add_argument("--vis_save_path", default="./vis_output", type=str)
     parser.add_argument(
@@ -80,6 +93,9 @@ def parse_args(args):
     )
     return parser.parse_args(args)
 
+#########################################
+#         Preprocessing Function        #
+#########################################
 
 def preprocess(
     x,
@@ -97,101 +113,11 @@ def preprocess(
     x = F.pad(x, (0, padw, 0, padh))
     return x
 
+#########################################
+#         Inference Function            #
+#########################################
 
-args = parse_args(sys.argv[1:])
-os.makedirs(args.vis_save_path, exist_ok=True)
-
-# Create model
-tokenizer = AutoTokenizer.from_pretrained(
-    args.version,
-    cache_dir=None,
-    model_max_length=args.model_max_length,
-    padding_side="right",
-    use_fast=False,
-)
-tokenizer.pad_token = tokenizer.unk_token
-args.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
-
-torch_dtype = torch.float32
-if args.precision == "bf16":
-    torch_dtype = torch.bfloat16
-elif args.precision == "fp16":
-    torch_dtype = torch.half
-
-kwargs = {"torch_dtype": torch_dtype}
-if args.load_in_4bit:
-    kwargs.update(
-        {
-            "torch_dtype": torch.half,
-            "load_in_4bit": True,
-            "quantization_config": BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                llm_int8_skip_modules=["visual_model"],
-            ),
-        }
-    )
-elif args.load_in_8bit:
-    kwargs.update(
-        {
-            "torch_dtype": torch.half,
-            "quantization_config": BitsAndBytesConfig(
-                llm_int8_skip_modules=["visual_model"],
-                load_in_8bit=True,
-            ),
-        }
-    )
-
-model = LISAForCausalLM.from_pretrained(
-    args.version,
-    low_cpu_mem_usage=True,
-    vision_tower=args.vision_tower,
-    seg_token_idx=args.seg_token_idx,
-    **kwargs
-)
-
-generation_config = GenerationConfig(
-    eos_token_id=tokenizer.eos_token_id,
-    bos_token_id=tokenizer.bos_token_id,
-    pad_token_id=tokenizer.pad_token_id,
-)
-
-model.get_model().initialize_vision_modules(model.get_model().config)
-vision_tower = model.get_model().get_vision_tower()
-vision_tower.to(dtype=torch_dtype)
-
-if args.precision == "bf16":
-    model = model.bfloat16().cuda()
-elif args.precision == "fp16" and (not args.load_in_4bit) and (not args.load_in_8bit):
-    vision_tower = model.get_model().get_vision_tower()
-    model.model.vision_tower = None
-    import deepspeed
-
-    model_engine = deepspeed.init_inference(
-        model=model,
-        dtype=torch.half,
-        replace_with_kernel_inject=True,
-        replace_method="auto",
-    )
-    model = model_engine.module
-    model.model.vision_tower = vision_tower.half().cuda()
-elif args.precision == "fp32":
-    model = model.float().cuda()
-
-vision_tower = model.get_model().get_vision_tower()
-vision_tower.to(device=args.local_rank)
-
-clip_image_processor = CLIPImageProcessor.from_pretrained(model.config.vision_tower)
-transform = ResizeLongestSide(args.image_size)
-# ------------------------------------------------------------------------------
-# End of model creation
-# ------------------------------------------------------------------------------
-
-# I need to convert the inference command to work for training
-
-def inference(input_str, input_image):
+def inference(input_str, input_image, args, model, tokenizer, clip_image_processor, transform):
     ## filter out special chars
     input_str = bleach.clean(input_str)
 
@@ -300,45 +226,145 @@ def inference(input_str, input_image):
         output_image = cv2.imread("./resources/no_seg_out.png")[:, :, ::-1]
     return output_image, output_str
 
+
+#########################################
+#            Main Function              #
+#########################################
+
 def main():
-    input_text = input("Enter your text: ")
-    input_image = input("Enter your image path: ")
-    output_image, output_text = inference(input_text, input_image)
-    print("Output text: ", output_text)
+
+    # input_text = input("Enter your text: ")
+    # input_image = input("Enter your image path: ")
+    # output_image, output_text = inference(input_text, input_image, args, model, tokenizer, clip_image_processor, transform)
+    # print("Output text: ", output_text)
+    # import sys
+    # sys.exit(0)
+
+    args = parse_args(sys.argv[1:])
+    os.makedirs(args.vis_save_path, exist_ok=True)
+
+    """
+    Not entirely sure if I need this part
+    -------------------------------------
+    """
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.version,
+        cache_dir=None,
+        model_max_length=args.model_max_length,
+        padding_side="right",
+        use_fast=False,
+    )
+    tokenizer.pad_token = tokenizer.unk_token
+    args.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
+    """
+    -------------------------------------
+    """
+
+    torch_dtype = torch.float32
+    if args.precision == "bf16":
+        torch_dtype = torch.bfloat16
+    elif args.precision == "fp16":
+        torch_dtype = torch.half
+
+    kwargs = {"torch_dtype": torch_dtype}
+    if args.load_in_4bit:
+        kwargs.update(
+            {
+                "torch_dtype": torch.half,
+                "load_in_4bit": True,
+                "quantization_config": BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                    llm_int8_skip_modules=["visual_model"],
+                ),
+            }
+        )
+    elif args.load_in_8bit:
+        kwargs.update(
+            {
+                "torch_dtype": torch.half,
+                "quantization_config": BitsAndBytesConfig(
+                    llm_int8_skip_modules=["visual_model"],
+                    load_in_8bit=True,
+                ),
+            }
+        )
+
+    model = LISAForCausalLM.from_pretrained(
+        args.version,
+        low_cpu_mem_usage=True,
+        vision_tower=args.vision_tower,
+        seg_token_idx=args.seg_token_idx,
+        **kwargs
+    )
+
+    generation_config = GenerationConfig(
+        eos_token_id=tokenizer.eos_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+
+    model.get_model().initialize_vision_modules(model.get_model().config)
+    vision_tower = model.get_model().get_vision_tower()
+    vision_tower.to(dtype=torch_dtype)
+
+    if args.precision == "bf16":
+        model = model.bfloat16().cuda()
+    elif args.precision == "fp16" and (not args.load_in_4bit) and (not args.load_in_8bit):
+        vision_tower = model.get_model().get_vision_tower()
+        model.model.vision_tower = None
+        import deepspeed
+
+        model_engine = deepspeed.init_inference(
+            model=model,
+            dtype=torch.half,
+            replace_with_kernel_inject=True,
+            replace_method="auto",
+        )
+        model = model_engine.module
+        model.model.vision_tower = vision_tower.half().cuda()
+    elif args.precision == "fp32":
+        model = model.float().cuda()
+
+    vision_tower = model.get_model().get_vision_tower()
+    vision_tower.to(device=args.local_rank)
+
+    clip_image_processor = CLIPImageProcessor.from_pretrained(model.config.vision_tower)
+    transform = ResizeLongestSide(args.image_size)
+
+    from datasets import load_from_disk
+
+    dataset_dict = load_from_disk("Processed_Med_Data/processed_kvasir_seg_dataset")
+    TRAIN_DATASET = dataset_dict["train"]
+    VAL_DATASET = dataset_dict["val"]
+
+    training_args = TrainingArguments(
+        output_dir="./checkpoints",  # Where to save checkpoints
+        evaluation_strategy="steps",  # Evaluate every few steps
+        per_device_train_batch_size=1,  # Training batch size per GPU
+        per_device_eval_batch_size=2,  # Evaluation batch size per GPU
+        gradient_accumulation_steps=16,  # Accumulate gradients to handle large models
+        logging_steps=50,  # Frequency of training logs
+        eval_steps=200,  # Frequency of evaluation
+        save_steps=200,  # Frequency of checkpoint saves
+        num_train_epochs=3,  # Total epochs to train
+        learning_rate=2e-5,  # Typical learning rate for large models
+        fp16=True,  # Mixed-precision for speed/memory
+        report_to="none",  # Disable online logging (e.g., WandB)
+    )
+
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=TRAIN_DATASET,
+        eval_dataset=VAL_DATASET,
+        data_collator=default_data_collator,
+    )
+
+    trainer.train()
 
 if __name__ == '__main__':
     main()
-
-# dataset = load_dataset("some_dataset", split="train").select(range(1000))
-# dataset_val = load_dataset("some_dataset", split="validation").select(range(200))
-
-# dataset = dataset.map(tokenizer, batched=True)
-# dataset_val = dataset_val.map(tokenizer, batched=True)
-
-# dataset.set_format("torch", columns=["input_ids"])
-# dataset_val.set_format("torch", columns=["input_ids"])
-
-training_args = TrainingArguments(
-    output_dir="./checkpoints",  # Where to save checkpoints
-    evaluation_strategy="steps",  # Evaluate every few steps
-    per_device_train_batch_size=1,  # Training batch size per GPU
-    per_device_eval_batch_size=2,  # Evaluation batch size per GPU
-    gradient_accumulation_steps=16,  # Accumulate gradients to handle large models
-    logging_steps=50,  # Frequency of training logs
-    eval_steps=200,  # Frequency of evaluation
-    save_steps=200,  # Frequency of checkpoint saves
-    num_train_epochs=3,  # Total epochs to train
-    learning_rate=2e-5,  # Typical learning rate for large models
-    fp16=True,  # Mixed-precision for speed/memory
-    report_to="none",  # Disable online logging (e.g., WandB)
-)
-
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=dataset,
-    eval_dataset=dataset_val,
-    data_collator=default_data_collator,
-)
-
-trainer.train()
