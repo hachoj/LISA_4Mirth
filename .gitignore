@@ -9,6 +9,9 @@ runs/
 *.webp
 *.nii.gz
 *.txt
+*.tar.gz
+*.zip
+*.gz
 
 Kvasir-SEG/Kvasir-SEG/bbox/*
 LISA_recreation_attempt/LISA_Plus_7b/*

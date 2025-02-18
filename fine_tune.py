@@ -119,7 +119,7 @@ def parse_args(args):
 #########################################
 
 
- def dice_loss(mask_logits, mask_labels, smooth=1e-6):
+def dice_loss(mask_logits, mask_labels, smooth=1e-6):
     """
     Compute Dice loss.
     Assumes mask_logits are raw outputs; applies sigmoid to convert to probabilities.
@@ -166,7 +166,7 @@ class CustomTrainer(Trainer):
             seg_loss = 2.0 * bce_loss + 0.5 * d_loss
         else:
             seg_loss = 0.0
-
+            
         total_loss = 1.0 * text_loss + 1.0 * seg_loss
 
         if return_outputs:
