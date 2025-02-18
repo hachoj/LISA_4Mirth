@@ -118,34 +118,61 @@ def parse_args(args):
 #               Trainer                 #
 #########################################
 
+
+ def dice_loss(mask_logits, mask_labels, smooth=1e-6):
+    """
+    Compute Dice loss.
+    Assumes mask_logits are raw outputs; applies sigmoid to convert to probabilities.
+    """
+    probs = torch.sigmoid(mask_logits)
+    # Flatten the tensors to compute per-sample dice
+    probs_flat = probs.view(probs.size(0), -1)
+    labels_flat = mask_labels.view(mask_labels.size(0), -1).float()
+    intersection = (probs_flat * labels_flat).sum(dim=1)
+    union = probs_flat.sum(dim=1) + labels_flat.sum(dim=1)
+    dice = (2 * intersection + smooth) / (union + smooth)
+    return 1 - dice.mean()
+
 class CustomTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False):
-        """
-        Custom loss computation.
-        This example assumes:
-          - `inputs` contains "labels" for the text.
-          - The model returns an output object with `logits` (for text) and optionally
-            `mask_logits` (for segmentation).
-          - You want to compute the cross-entropy loss only for tokens after the [SEG] token.
-        """
-        outputs = model(**inputs)
-        print(outputs)
-        import sys
-        sys.exit(0)
-        
+        print(inputs) 
+        # I think this will have have binary_mask rather than mask_labels but I have to run this
+        # to be able to see
 
-        text_loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), ignore_index=-100)
-        
-        # Compute segmentation mask loss
-        mask_logits = outputs.get("mask_logits")  # e.g., shape: [batch_size, num_classes, H, W]
-        mask_labels = inputs.get("mask_labels")    # e.g., shape: [batch_size, H, W]
-        # Using binary cross entropy as an example; customize as needed:
-        mask_loss = F.binary_cross_entropy_with_logits(mask_logits.float(), mask_labels.float())
-        
-        # Combine losses (optionally add weights)
-        loss = text_loss + mask_loss
+        outputs = model(**inputs)  # Forward pass; should return a dict with 'logits' and optionally 'mask_logits'
+        logits = outputs.logits  # Text logits (batch, seq_len, vocab_size)
+        labels = inputs.get("labels")  # (batch, seq_len)
 
-        return (loss, outputs) if return_outputs else loss
+        # Compute text loss (auto-regressive, computed for every token)
+        text_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), reduction="mean")
+
+        # Compute segmentation loss if available:
+        if hasattr(outputs, "mask_logits") and inputs.get("mask_labels") is not None:
+            # Compute BCE loss (assuming you want to mimic BCE as in the paper)
+            # Option 1: Use BCE with logits (more stable):
+            bce_loss = F.binary_cross_entropy_with_logits(
+                outputs.mask_logits, 
+                inputs["mask_labels"].float()
+            )
+            # Option 2: If you want plain BCE, apply sigmoid first:
+            # probs = torch.sigmoid(outputs.mask_logits)
+            # bce_loss = F.binary_cross_entropy(
+            #     probs,
+            #     inputs["mask_labels"].float()
+            # )
+            # Compute Dice loss
+            d_loss = dice_loss(outputs.mask_logits, inputs["mask_labels"])
+            # Average the two losses equally
+            seg_loss = 2.0 * bce_loss + 0.5 * d_loss
+        else:
+            seg_loss = 0.0
+
+        total_loss = 1.0 * text_loss + 1.0 * seg_loss
+
+        if return_outputs:
+            return total_loss, outputs
+        else:
+            return total_loss
 
 # def inference(input_str, input_image, args, model, tokenizer, clip_image_processor, transform):
 #     ## filter out special chars
