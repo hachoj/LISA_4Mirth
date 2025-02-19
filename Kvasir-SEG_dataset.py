@@ -10,6 +10,25 @@ from transformers import (
 )
 from model.llava.mm_utils import tokenizer_image_token
 
+from transformers import CLIPImageProcessor
+from model.segment_anything.utils.transforms import ResizeLongestSide
+
+clip_image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
+transform = ResizeLongestSide(1024)
+
+
+def preprocess(x, pixel_mean=torch.Tensor([123.675, 116.28, 103.53]).view(-1,1,1),
+               pixel_std=torch.Tensor([58.395,57.12,57.375]).view(-1,1,1),
+               img_size=1024):
+    """Normalize and pad to a square input."""
+    x = (x - pixel_mean) / pixel_std
+    h, w = x.shape[-2:]
+    padh = img_size - h
+    padw = img_size - w
+    x = torch.nn.functional.pad(x, (0, padw, 0, padh))
+    return x
+
+
 tokenizer = AutoTokenizer.from_pretrained(
     "xinlai/LISA-13B-llama2-v1",
     cache_dir=None,
@@ -90,10 +109,38 @@ def process_fn(example):
     if mask is None or img is None:
         return example
     
+    # Convert image to RGB.
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
+    # --- Image Processing for CLIP ---
+    # Get the CLIP image tensor.
+    clip_out = clip_image_processor.preprocess(img_rgb, return_tensors="pt")["pixel_values"][0]
+    # (If desired, cast to float; since you're using a fixed precision, you can call .float())
+    example["image_clip"] = clip_out.float()
+    
+    # --- Custom Image Processing ---
+    # Use your transform to resize and then preprocess.
+    transformed = transform.apply_image(img_rgb)
+    # Convert from numpy to tensor and permute dimensions from HWC to CHW.
+    transformed_tensor = torch.from_numpy(transformed).permute(2, 0, 1).contiguous()
+    processed_img = preprocess(transformed_tensor)
+    example["image_tensor"] = processed_img.float()
+    
+    # Record the resize list (here, using the processed image dimensions).
+    # Assuming processed_img shape is (C, H, W)
+    example["resize_list"] = [processed_img.shape[1:]]  # [H, W]
+    
+    # --- Tokenize the Conversation ---
+    # Assemble a conversation prompt that matches your inference logic.
+    # For example, you might join the prompt and response with the [SEG] token.
+    conversation = f"{example['prompt']} {example['response']}"
+    tokenized = tokenizer_image_token(conversation, tokenizer, return_tensors="pt")
+    # Remove extra dimension if necessary.
+    example["input_ids"] = tokenized.squeeze(0)
+
     _, binary_mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
     
     example["binary_mask"] = binary_mask
-    example["image"] = img
 
     return example
 
