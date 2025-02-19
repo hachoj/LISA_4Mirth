@@ -83,7 +83,6 @@ def build_records(txt_file, images_dir, masks_dir):
                 "text_prompt": prompt_tokens,
                 "text_response": response_tokens,
             }
-            print(record) 
 
             records.append(record)
     return records
@@ -147,4 +146,4 @@ def process_fn(example):
 dataset_dict = dataset_dict.map(process_fn)
 
 # Saving the processed dataset to disk
-dataset_dict.save_to_disk("processed_kvasir_seg_dataset")
+dataset_dict.save_to_disk("med_data_datasets/processed_kvasir_seg_dataset")
