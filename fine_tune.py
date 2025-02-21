@@ -53,6 +53,12 @@ PER_DEVICE_EVAL_BATCH_SIZE = 2
 GRADIENT_ACCUMULATION_STEPS = 16
 LEARNING_RATE = 2e-5
 
+# Loss weighting
+BCE_WEIGHT = 2.0
+DICE_WEIGHT = 0.5
+TEXT_LOSS_WEIGHT = 1.0
+SEGMENTATION_LOSS_WEIGHT = 1.0
+
 #########################################
 #         Argument Parsing              #
 #########################################
@@ -108,12 +114,12 @@ class CustomTrainer(Trainer):
                 inputs["mask_labels"].float()
             )
             d_loss = dice_loss(outputs.mask_logits, inputs["mask_labels"])
-            # Use the weighting from the original model: 2.0 for BCE and 0.5 for Dice.
-            seg_loss = 2.0 * bce_loss + 0.5 * d_loss
+
+            seg_loss = BCE_WEIGHT * bce_loss + DICE_WEIGHT * d_loss
         else:
             seg_loss = 0.0
         
-        total_loss = text_loss + seg_loss
+        total_loss = TEXT_LOSS_WEIGHT + text_loss + SEGMENTATION_LOSS_WEIGHT + seg_loss
         if return_outputs:
             return total_loss, outputs
         else:
@@ -127,6 +133,10 @@ def main():
     args = parse_args(sys.argv[1:])
     os.makedirs(args.vis_save_path, exist_ok=True)
 
+    """
+    Not entirely sure why I need this to be initialized but currently
+    I do
+    """
     # Initialize tokenizer and add special tokens.
     tokenizer = AutoTokenizer.from_pretrained(
         args.version,
@@ -139,6 +149,9 @@ def main():
 
     torch_dtype = torch.float32  # For GH200, using fp32.
     
+    """
+    """
+    
     # Load the model.
     model = LISAForCausalLM.from_pretrained(
         args.version,
@@ -147,15 +160,12 @@ def main():
         seg_token_idx=args.seg_token_idx,
     ).float().cuda()
 
-    # 1. Freeze everything by default.
+    # By default, freeze all the parameters
     for name, param in model.named_parameters():
         param.requires_grad = False
 
-    # 2. Unfreeze only the key modules:
-    #    - mask_decoder
-    #    - text_hidden_fcs
-    #    - lm_head
-    #    - embed_tokens
+    # Unfreeze the parameters that LiSA trained on
+    # Not the base models parameters
     for name, param in model.named_parameters():
         # For the mask decoder:
         if "mask_decoder" in name:
@@ -171,22 +181,17 @@ def main():
         
         # For the embedding layer:
         if "embed_tokens" in name:
-            param.requires_grad = True
-        
-        # If you want to unfreeze the prompt_encoder, you could do:
-        # if "prompt_encoder" in name:
-        #     param.requires_grad = True
-
-    # 3. (Optional) If LoRA is integrated, unfreeze only the LoRA adapter parameters:
-    #    for name, param in model.named_parameters():
-    #        if "lora_" in name.lower():
-    #            param.requires_grad = True
+            param.requires_grad = True        
 
     # Then confirm how many parameters are trainable:
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    print(f"Trainable parameters: {trainable} / {total}")
+    number_of_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    number_of_total_params = sum(p.numel() for p in model.parameters())
+    print(f"Trainable parameters: {number_of_trainable_params} / {number_of_total_params}")
 
+    """
+    Also not sure why I need to do this
+    Might remove but I guess it's important
+    """
     generation_config = GenerationConfig(
         eos_token_id=tokenizer.eos_token_id,
         bos_token_id=tokenizer.bos_token_id,
@@ -198,12 +203,6 @@ def main():
     vision_tower = model.get_model().get_vision_tower()
     vision_tower.to(dtype=torch_dtype)
 
-    # Freeze base vision and mm_projector weights.
-    for p in vision_tower.parameters():
-        p.requires_grad = False
-    for p in model.get_model().mm_projector.parameters():
-        p.requires_grad = False
-
     # Initialize additional LISA modules if necessary.
     if not hasattr(model.get_model(), "initialized_lisa"):
         model.get_model().initialize_lisa_modules(model.get_model().config)
@@ -211,17 +210,10 @@ def main():
 
     conversation_lib.default_conversation = conversation_lib.conv_templates[args.conv_type]
 
-    # Note: Since you don't want to rewrap, we skip get_peft_model here.
-    # The model already has LoRA layers integrated, so we rely on the above freezing logic.
-
     model.resize_token_embeddings(len(tokenizer))
     model = model.float().cuda()
     vision_tower = model.get_model().get_vision_tower()
     vision_tower.to(device=args.local_rank)
-
-    # Setup image processors if needed.
-    clip_image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
-    transform = ResizeLongestSide(args.image_size)
 
     training_args = TrainingArguments(
         output_dir="./checkpoints/polyp_only",

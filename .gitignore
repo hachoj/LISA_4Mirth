@@ -2,6 +2,8 @@
 runs/
 .vscode/
 
+/raw_med_data/*
+
 *.tif
 *.jpg
 *.png
