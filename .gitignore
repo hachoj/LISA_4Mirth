@@ -3,6 +3,8 @@ runs/
 .vscode/
 
 /raw_med_data/*
+/datasets/*
+/processed_med_data/*
 
 *.tif
 *.jpg
