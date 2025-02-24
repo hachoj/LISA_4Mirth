@@ -42,7 +42,7 @@ CUDA_VISIBLE_DEVICES=0 python fine_tune.py --version 'xinlai/LISA-13B-llama2-v1'
 #########################################
 
 # Load preprocessed dataset from disk.
-dataset_dict = load_from_disk("med_data_datasets/processed_kvasir_seg_dataset")
+dataset_dict = load_from_disk("datasets/processed_kvasir_seg_dataset")
 TRAIN_DATASET = dataset_dict["train"]
 VAL_DATASET = dataset_dict["validation"]
 
