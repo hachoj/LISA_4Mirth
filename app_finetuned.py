@@ -23,6 +23,9 @@ from utils.utils import (
     IMAGE_TOKEN_INDEX,
 )
 
+"""
+CUDA_VISIBLE_DEVICES=0 python app_base.py --version 'xinlai/LISA-13B-llama2-v1' --load_in_4bit
+"""
 
 def parse_args(args):
     parser = argparse.ArgumentParser(description="LISA chat")

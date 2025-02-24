@@ -54,6 +54,7 @@ def sigmoid_ce_loss(
     Returns:
         Loss tensor
     """
+    # loss = F.binary_cross_entropy_with_logits(inputs, targets)
     loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
     loss = loss.flatten(1, 2).mean(1).sum() / (num_masks + 1e-8)
     return loss
@@ -135,7 +136,8 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             self.dice_loss_weight = kwargs.pop("dice_loss_weight", None)
             self.bce_loss_weight = kwargs.pop("bce_loss_weight", None)
         else:
-            config.mm_vision_tower = config.vision_tower
+            config.mm_vision_tower = config.mm_vision_tower
+            # config.mm_vision_tower = config.vision_tower
             
         self.seg_token_idx = kwargs.pop("seg_token_idx")
 
@@ -180,23 +182,27 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         inference: bool = False,
         **kwargs,
     ):
+
         image_embeddings = self.get_visual_embs(images)
         batch_size = image_embeddings.shape[0]
         assert batch_size == len(offset) - 1
 
-        seg_token_mask = input_ids[:, 1:] == self.seg_token_idx
-        seg_token_mask = torch.cat(
-            [
-                seg_token_mask,
-                torch.zeros((seg_token_mask.shape[0], 1)).bool().cuda(),
-            ],
-            dim=1,
-        )
-        # hack for IMAGE_TOKEN_INDEX (we suppose that there is only one image, and it is in the front)
-        seg_token_mask = torch.cat(
-            [torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(), seg_token_mask],
-            dim=1,
-        )
+        seg_token_mask = input_ids == self.seg_token_idx
+        # print(seg_token_mask.shape)
+        # print(seg_token_mask)
+        # seg_token_mask = input_ids[:, 1:] == self.seg_token_idx
+        # seg_token_mask = torch.cat(
+        #     [
+        #         seg_token_mask,
+        #         torch.zeros((seg_token_mask.shape[0], 1)).bool().cuda(),
+        #     ],
+        #     dim=1,
+        # )
+        # # hack for IMAGE_TOKEN_INDEX (we suppose that there is only one image, and it is in the front)
+        # seg_token_mask = torch.cat(
+        #     [torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(), seg_token_mask],
+        #     dim=1,
+        # )
 
         if inference:
             n_batch = 1
@@ -289,7 +295,8 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             pred_mask = self.model.visual_model.postprocess_masks(
                 low_res_masks,
                 input_size=resize_list[i],
-                original_size=label_list[i].shape,
+                # original_size=label_list[i].shape,
+                original_size=label_list[i],
             )
             pred_masks.append(pred_mask[:, 0])
 

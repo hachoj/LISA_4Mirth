@@ -48,8 +48,8 @@ all_respones_txt = "processed_med_data/Kvasir-SEG/random_responses.txt"
 train_images_dir = "processed_med_data/Kvasir-SEG/images/train"
 train_masks_dir = "processed_med_data/Kvasir-SEG/masks/train"
 
-val_images_dir = "../processed_med_data/Kvasir-SEG/images/val"
-val_masks_dir = "../processed_med_data/Kvasir-SEG/masks/val"
+val_images_dir = "processed_med_data/Kvasir-SEG/images/val"
+val_masks_dir = "processed_med_data/Kvasir-SEG/masks/val"
 
 # load the random labels and responses
 with open(all_prompts_txt, "r") as f:
@@ -81,10 +81,7 @@ def build_records(txt_file, images_dir, masks_dir):
                 "mask_path": mask_path,
                 "prompt": text_prompt,
                 "response": text_response,
-                "text_prompt": prompt_tokens,
-                "text_response": response_tokens,
             }
-
             records.append(record)
     return records
 
@@ -94,24 +91,6 @@ val_records = build_records(val_split_txt, val_images_dir, val_masks_dir)
 train_dataset = Dataset.from_list(train_records)
 val_dataset = Dataset.from_list(val_records)
 
-# Dataset structure:
-"""
-"image_path": image_path,
-"mask_path": mask_path,
-"prompt": text_prompt,
-"response": text_response,
-"text_prompt": prompt_tokens,
-"text_response": response_tokens,
-
-after processing adds
-
-"binary_mask": binary_mask,
-"image_clip": clip_out.float(),
-"image_tensor": processed_img.float(),
-"resize_list": [processed_img.shape[1:]],
-"input_ids": tokenized.squeeze(0)
-    Further input_ids is made of the format: f"{example['prompt']} {example['response']}"
-"""
 
 dataset_dict = DatasetDict({
     "train": train_dataset,
@@ -119,50 +98,27 @@ dataset_dict = DatasetDict({
 })
 
 def process_fn(example):
-    img_path = example["image_path"]
     msk_path = example["mask_path"]
 
-    # First, process the mask ground truth mask.
     mask = cv2.imread(msk_path, cv2.IMREAD_GRAYSCALE)
-    img = cv2.imread(img_path)
-    if mask is None or img is None:
+    if mask is None:
         return example
 
-    _, binary_mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
-    
+    _, binary_mask = cv2.threshold(mask, 127, 1, cv2.THRESH_BINARY)
     example["binary_mask"] = binary_mask
-    
-
-    # Convert image to RGB.
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    # --- Image Processing for CLIP ---
-    # Get the CLIP image tensor.
-    clip_out = clip_image_processor.preprocess(img_rgb, return_tensors="pt")["pixel_values"][0]
-    # (If desired, cast to float; since you're using a fixed precision, you can call .float())
-    example["image_clip"] = clip_out.float()
-    
-    # --- Custom Image Processing ---
-    # Use your transform to resize and then preprocess.
-    transformed_image = transform.apply_image(img_rgb)
-    # Convert from numpy to tensor and permute dimensions from HWC to CHW.
-    transformed_tensor = torch.from_numpy(transformed_image).permute(2, 0, 1).contiguous()
-    processed_img_tensor = preprocess(transformed_tensor)
-    example["image_tensor"] = processed_img_tensor.float()
-    
-    # Record the resize list (here, using the processed image dimensions).
-    # Assuming processed_img shape is (C, H, W)
-    example["resize_list"] = [processed_img_tensor.shape[1:]]  # [H, W]
-    
-    # --- Tokenize the Conversation ---
-    conversation = f"{example['prompt']} {example['response']}"
-    tokenized = tokenizer_image_token(conversation, tokenizer, return_tensors="pt")
-    # Remove extra dimension if necessary.
-    example["input_ids"] = tokenized.squeeze(0)
-
     return example
 
 dataset_dict = dataset_dict.map(process_fn)
 
+"""
+Dataset Structure
+
+image_path: str
+mask_path: str
+prompt: str
+response: str
+binary_mask: np.ndarray
+"""
+ 
 # Saving the processed dataset to disk
-dataset_dict.save_to_disk("../med_data_datasets/processed_kvasir_seg_dataset")
+dataset_dict.save_to_disk("datasets/processed_kvasir_seg_dataset")

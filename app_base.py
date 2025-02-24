@@ -23,6 +23,9 @@ from utils.utils import (
     IMAGE_TOKEN_INDEX,
 )
 
+"""
+CUDA_VISIBLE_DEVICES=0 python app_base.py --version 'xinlai/LISA-13B-llama2-v1'
+"""
 
 def parse_args(args):
     parser = argparse.ArgumentParser(description="LISA chat")
@@ -30,7 +33,7 @@ def parse_args(args):
     parser.add_argument("--vis_save_path", default="./vis_output", type=str)
     parser.add_argument(
         "--precision",
-        default="fp16",
+        default="fp32",
         type=str,
         choices=["fp32", "bf16", "fp16"],
         help="precision for inference",
@@ -272,7 +275,7 @@ def inference(input_str, input_image):
         image = image.half()
     else:
         image = image.float()
-
+ 
     input_ids = tokenizer_image_token(prompt, tokenizer, return_tensors="pt")
     input_ids = input_ids.unsqueeze(0).cuda()
 
