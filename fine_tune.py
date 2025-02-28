@@ -6,7 +6,7 @@ import cv2
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from deepspeed.runtime.lr_schedules import WarmupDecayLR
-from datasets import load_from_disk
+from datasets import load_from_disk, concatenate_datasets
 from PIL import Image
 from transformers import (
     GenerationConfig,
@@ -24,6 +24,7 @@ from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
 from model.llava.mm_utils import tokenizer_image_token
 from model.segment_anything.utils.transforms import ResizeLongestSide
+import numpy as np
 from utils.utils import (
     DEFAULT_IM_END_TOKEN,
     DEFAULT_IM_START_TOKEN,
@@ -50,31 +51,49 @@ def preprocess(
 
 """
 Run script:
-CUDA_VISIBLE_DEVICES=0 python fine_tune_pythonic.py --version 'xinlai/LISA-13B-llama2-v1'
+CUDA_VISIBLE_DEVICES=0 python fine_tune.py --version 'xinlai/LISA-13B-llama2-v1'
 """
 
 """
 Fine-Tuning Constants/Configuration
 """
 
-# Load preprocessed dataset from disk.
-dataset_dict = load_from_disk("datasets/processed_kvasir_seg_dataset")
-TRAIN_DATASET = dataset_dict["train"]
-VAL_DATASET = dataset_dict["validation"]
+# Load preprocessed datasets from disk
+dataset_dict_polyp = load_from_disk("datasets/processed_kvasir_seg_dataset")
+dataset_dict_retina1 = load_from_disk("datasets/processed_chase_retina_dataset")
+dataset_dict_retina2 = load_from_disk("datasets/processed_drive_retina_dataset") 
+dataset_dict_chest = load_from_disk("datasets/processed_chest_dataset")
+
+# Combine training datasets
+TRAIN_DATASET = concatenate_datasets([
+    dataset_dict_polyp["train"],
+    dataset_dict_retina1["train"],
+    dataset_dict_retina2["train"],
+    dataset_dict_chest["train"]
+])
+
+# Combine validation datasets 
+VAL_DATASET = concatenate_datasets([
+    dataset_dict_polyp["validation"],
+    dataset_dict_retina1["validation"],
+    dataset_dict_retina2["validation"],
+    dataset_dict_chest["validation"]
+])
 
 # Training hyperparameters.
-NUM_TRAIN_EPOCHS = 1
-PER_DEVICE_TRAIN_BATCH_SIZE = 1
-PER_DEVICE_EVAL_BATCH_SIZE = 1
-NUM_VAL_TESTS = 10
-GRADIENT_ACCUMULATION_STEPS = 16
-LEARNING_RATE = 3e-4
+NUM_TRAIN_EPOCHS = 2
+# batch size can go north of 256 but choosing
+# a smaller value for now
+PER_DEVICE_TRAIN_BATCH_SIZE = 16
+PER_DEVICE_EVAL_BATCH_SIZE = 16
+GRADIENT_ACCUMULATION_STEPS = 1
+LEARNING_RATE = 1e-4
 
 # Loss weighting
 BCE_WEIGHT = 2.0
 DICE_WEIGHT = 0.5
-TEXT_LOSS_WEIGHT = 1.0
-SEGMENTATION_LOSS_WEIGHT = 1.0
+TEXT_LOSS_WEIGHT = 0.8
+SEGMENTATION_LOSS_WEIGHT = 1.1
 
 """
 Arugment Parsing
@@ -115,13 +134,6 @@ args = parse_args(None)
 
 """
 Tokenization
-
-why?
-I was initially planning on tokenizing the image before
-making the dataset and then just loading the tokenzied data
-into the dataset however this caused the dataset to be 
-much too large and caused many issues in processing so I
-have decided to do tokenization on the fly
 """
 
 # Initialize the CLIP image processor and resize transform.
@@ -132,8 +144,8 @@ tokenizer = AutoTokenizer.from_pretrained(
     args.version,
     cache_dir=None,
     model_max_length=args.model_max_length,
-    padding_side="right",
     use_fast=False,
+    padding=False,
 )
 tokenizer.pad_token = tokenizer.unk_token
 
@@ -263,13 +275,46 @@ def custom_data_collator(features):
         
         # Important: Don't interpolate here - let SAM handle it
         mask_labels.append(mask)
+
+
+    # Text padding
+    # NEW CODE: Handle padding for variable length sequences
+    # Find the maximum sequence length in this batch
+    max_length = max(ids.size(0) for ids in input_ids_list)
+
+    padded_input_ids = []
+    padded_attention_masks = []
+
+    for _, (input_ids, mask) in enumerate(zip(input_ids_list, attention_masks)):
+        # Calculate padding needed for this example
+        padding_length = max_length - input_ids.size(0)
+        
+        if padding_length > 0:
+            # Create padding tensor filled with pad_token_id
+            padding = torch.full((padding_length,), tokenizer.pad_token_id, 
+                                dtype=input_ids.dtype)
+            # Pad the input_ids
+            padded_input_ids.append(torch.cat([input_ids, padding], dim=0))
+            
+            # Create attention mask padding (0s)
+            mask_padding = torch.zeros(padding_length, dtype=mask.dtype)
+            # Pad the attention mask
+            padded_attention_masks.append(torch.cat([mask, mask_padding], dim=0))
+        else:
+            # No padding needed
+            padded_input_ids.append(input_ids)
+            padded_attention_masks.append(mask)
+
     batch["image"] = torch.cat(image_tensors, dim=0)
     batch["image_clip"] = torch.cat(clip_tensors, dim=0)
-    batch["input_ids"] = torch.stack(input_ids_list)
+
+    batch["input_ids"] = torch.stack(padded_input_ids)
     batch["labels"] = batch["input_ids"].clone()
-    batch["attention_masks"] = torch.stack(attention_masks)
+    batch["attention_masks"] = torch.stack(padded_attention_masks)
+
     # offset not needed here
-    batch["masks_list"] = torch.cat(mask_labels, dim=0)  # [B, 1, H, W]
+    # batch["masks_list"] = torch.cat(mask_labels, dim=0)  # [B, 1, H, W]
+    batch["masks_list"] = mask_labels
     batch["label_list"] = [mask.shape[-2:] for mask in mask_labels]
     batch["resize_list"] = resize_list
     batch["original_sizes"] = original_sizes
@@ -381,6 +426,11 @@ def dice_loss(mask_logits, mask_labels, smooth=1e-6):
 
 def train():
     lossi = []
+    text_lossi = []
+    mask_bce_lossi = []
+    mask_dice_lossi = []
+    mask_lossi = []
+    vali = [1]
     train_loader = DataLoader(
         TRAIN_DATASET,
         batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
@@ -404,6 +454,9 @@ def train():
         epoch_loss = 0
         steps_in_epoch = 0
         for step, batch in enumerate(train_loader):
+
+            num_epoch_steps = len(train_loader)
+
             # Move batched tensors to GPU.
             batch = {k: (v.cuda() if torch.is_tensor(v) else v) for k, v in batch.items()}
             batch_size = len(batch["prompt"])
@@ -436,63 +489,83 @@ def train():
 
             current_loss = loss.item()
             lossi.append(current_loss)
+            text_lossi.append(outputs["ce_loss"].item())
+            mask_bce_lossi.append(outputs["mask_bce_loss"].item())
+            mask_dice_lossi.append(outputs["mask_dice_loss"].item())
+            mask_lossi.append(outputs["mask_loss"].item())
             epoch_loss += current_loss
             steps_in_epoch += 1
-            
-            if (step + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
+
+            if GRADIENT_ACCUMULATION_STEPS == 1:
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-                avg_loss = epoch_loss / steps_in_epoch
-                print(f"Epoch {epoch+1} Step {step//GRADIENT_ACCUMULATION_STEPS} Loss: {avg_loss:.4f}")
+                ce_loss = outputs["ce_loss"].item()
+                mask_bce_loss = outputs["mask_bce_loss"].item()
+                mask_dice_loss = outputs["mask_dice_loss"].item()
+                mask_loss = outputs["mask_loss"].item()
 
-        # Validation loop
-        val_loss = 0
-        val_steps = 0
-        print("\nRunning validation...")
-        with torch.no_grad():
-            for val_batch in val_loader:
-                # Move tensors to GPU and ensure proper batch dimension
-                val_batch = {k: (v.cuda() if torch.is_tensor(v) else v) for k, v in val_batch.items()}
-                
-                # Ensure proper batch dimension for all tensors
-                batch_size = val_batch["input_ids"].size(0)
-                offset = torch.arange(batch_size + 1).cuda()
-                
-                # Handle single example case
-                if batch_size == 1:
-                    for k, v in val_batch.items():
-                        if torch.is_tensor(v) and len(v.shape) >= 2:
-                            val_batch[k] = v.squeeze(0)
-                
-                outputs = model(
-                    images=batch["image"],              # segmentation input image
-                    images_clip=batch["image_clip"],      # CLIP input image
-                    input_ids=batch["input_ids"],
-                    labels=batch["labels"],
-                    attention_masks=batch["attention_masks"],
-                    offset=offset,
-                    masks_list=batch["masks_list"],
-                    label_list=batch["label_list"],
-                    resize_list=batch["resize_list"],
-                )
-                
-                val_loss += outputs["loss"].item()
-                val_steps += 1
+                print(f"Epoch {epoch+1} Step {step//GRADIENT_ACCUMULATION_STEPS} | Text Loss: {ce_loss:.4f} | Mask BCE Loss: {mask_bce_loss:.4f} | Mask Dice Loss: {mask_dice_loss:.4f} | Mask Loss: {mask_loss:.4f} | Avg Loss: {current_loss:.4f}")
+            else:            
+                if (step + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
 
-                if val_steps >= NUM_VAL_TESTS:
-                    break 
-        
-        avg_val_loss = val_loss / (val_steps if val_steps > 0 else 1)
-        print(f"\nValidation Loss: {avg_val_loss:.4f}")
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            os.makedirs(args.vis_save_path, exist_ok=True)
-            save_path = os.path.join(args.vis_save_path, "best_model.pt")
-            torch.save(model.state_dict(), save_path)
-            print(f"New best model saved with validation loss: {avg_val_loss:.4f}")
+                    ce_loss = outputs["ce_loss"].item()
+                    mask_bce_loss = outputs["mask_bce_loss"].item()
+                    mask_dice_loss = outputs["mask_dice_loss"].item()
+                    mask_loss = outputs["mask_loss"].item()
+
+                    avg_loss = epoch_loss / steps_in_epoch
+                    print(f"Epoch {epoch+1} Step {step//GRADIENT_ACCUMULATION_STEPS} | Text Loss: {ce_loss:.4f} | Mask BCE Loss: {mask_bce_loss:.4f} | Mask Dice Loss: {mask_dice_loss:.4f} | Mask Loss: {mask_loss:.4f} | Avg Loss: {avg_loss:.4f}")
+            
+            if num_epoch_steps // 3 == step or num_epoch_steps // 3 == 2*step or num_epoch_steps - 1 == step:
+                # Validation loop
+                val_loss = 0
+                val_steps = 0
+                print("\nRunning validation...")
+                with torch.no_grad():
+                    num_val_steps = len(val_loader)
+                    for val_batch in val_loader:
+                        # Move tensors to GPU and ensure proper batch dimension
+                        val_batch = {k: (v.cuda() if torch.is_tensor(v) else v) for k, v in val_batch.items()}
+                        
+                        # Ensure proper batch dimension for all tensors
+                        batch_size = val_batch["input_ids"].size(0)
+                        offset = torch.arange(batch_size + 1).cuda()
+                        
+                        outputs = model(
+                            images=val_batch["image"],
+                            images_clip=val_batch["image_clip"],
+                            input_ids=val_batch["input_ids"],
+                            labels=val_batch["labels"],
+                            attention_masks=val_batch["attention_masks"],
+                            offset=offset,
+                            masks_list=val_batch["masks_list"],
+                            label_list=val_batch["label_list"],
+                            resize_list=val_batch["resize_list"],
+                        )
+                        
+                        val_loss += outputs["loss"].item()
+                        val_steps += 1
+
+                        print(f"Validation Step {val_steps}/{num_val_steps//3} | Loss: {outputs['loss'].item():.4f}")
+
+                        if num_val_steps // 3 == val_steps:
+                            break
+                
+                avg_val_loss = val_loss / (val_steps if val_steps > 0 else 1)
+                vali.append(avg_val_loss)
+                print(f"\nValidation Loss: {avg_val_loss:.4f}")
+                # Save best model
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    os.makedirs(args.vis_save_path, exist_ok=True)
+                    save_path = os.path.join(args.vis_save_path, "best_model.pt")
+                    torch.save(model.state_dict(), save_path)
+                    print(f"New best model saved with validation loss: {avg_val_loss:.4f}")
         
         print(f"Epoch {epoch+1} completed.")
 
@@ -501,7 +574,7 @@ def train():
     save_path = os.path.join(args.vis_save_path, "model.pt")
     torch.save(model.state_dict(), save_path)
     print(f"Model saved to {save_path}")
-    return lossi
+    return lossi, text_lossi, mask_bce_lossi, mask_dice_lossi, mask_lossi, vali
 
 
 """
@@ -510,9 +583,53 @@ Run Training
 
 def main():
     import matplotlib.pyplot as plt
-    lossi = train()
-    plt.plot(lossi)
-    plt.show()
+    lossi, text_lossi, mask_bce_lossi, mask_dice_lossi, mask_lossi, vali = train()
+    
+    # Convert lists to numpy arrays
+    losses = {
+        'total_loss': np.array(lossi),
+        'text_loss': np.array(text_lossi), 
+        'mask_bce_loss': np.array(mask_bce_lossi),
+        'mask_dice_loss': np.array(mask_dice_lossi),
+        'mask_loss': np.array(mask_lossi),
+        'val_loss': np.array(vali)
+    }
+    
+    # Save arrays
+    np.save('training_losses.npy', losses)
+    
+    # Create a figure with 5 subplots
+    fig, axes = plt.subplots(3, 2, figsize=(15, 12))
+    fig.delaxes(axes[2,1]) # Remove extra subplot
+    
+    # Plot each loss
+    axes[0,0].plot(losses['total_loss'])
+    axes[0,0].set_title('Total Loss')
+    axes[0,0].set_xlabel('Steps')
+    axes[0,0].set_ylabel('Loss')
+    
+    axes[0,1].plot(losses['text_loss'])
+    axes[0,1].set_title('Text Loss')
+    axes[0,1].set_xlabel('Steps')
+    axes[0,1].set_ylabel('Loss')
+    
+    axes[1,0].plot(losses['mask_bce_loss'])
+    axes[1,0].set_title('Mask BCE Loss')
+    axes[1,0].set_xlabel('Steps')
+    axes[1,0].set_ylabel('Loss')
+    
+    axes[1,1].plot(losses['mask_dice_loss'])
+    axes[1,1].set_title('Mask Dice Loss')
+    axes[1,1].set_xlabel('Steps')
+    axes[1,1].set_ylabel('Loss')
+    
+    axes[2,0].plot(losses['mask_loss'])
+    axes[2,0].set_title('Mask Loss')
+    axes[2,0].set_xlabel('Steps')
+    axes[2,0].set_ylabel('Loss')
+    
+    plt.tight_layout()
+    plt.savefig('all_losses.png')
 
 
 if __name__ == "__main__":
