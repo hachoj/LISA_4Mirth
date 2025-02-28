@@ -24,16 +24,17 @@ from utils.utils import (
 )
 
 """
-CUDA_VISIBLE_DEVICES=0 python app_base.py --version 'xinlai/LISA-13B-llama2-v1' --load_in_4bit
+CUDA_VISIBLE_DEVICES=0 python app_finetune.py --version 'xinlai/LISA-13B-llama2-v1' --local_model 'checkpoints/all_data/best_model.pt'
 """
 
 def parse_args(args):
     parser = argparse.ArgumentParser(description="LISA chat")
     parser.add_argument("--version", default="xinlai/LISA-13B-llama2-v1")
+    parser.add_argument("--local_model", default=None, help="Path to local model weights file")
     parser.add_argument("--vis_save_path", default="./vis_output", type=str)
     parser.add_argument(
         "--precision",
-        default="fp16",
+        default="fp32",
         type=str,
         choices=["fp32", "bf16", "fp16"],
         help="precision for inference",
@@ -120,13 +121,44 @@ elif args.load_in_8bit:
         }
     )
 
-model = LISAForCausalLM.from_pretrained(
-    args.version,
-    low_cpu_mem_usage=True,
-    vision_tower=args.vision_tower,
-    seg_token_idx=args.seg_token_idx,
-    **kwargs
-)
+# Load model from HuggingFace by default
+if args.local_model is None:
+    print(f"Loading model from HuggingFace: {args.version}")
+    model = LISAForCausalLM.from_pretrained(
+        args.version,
+        low_cpu_mem_usage=True,
+        vision_tower=args.vision_tower,
+        seg_token_idx=args.seg_token_idx,
+        **kwargs
+    )
+# Load model from local file if specified
+else:
+    print(f"Loading model architecture from HuggingFace: {args.version}")
+    model = LISAForCausalLM.from_pretrained(
+        args.version,
+        low_cpu_mem_usage=True,
+        vision_tower=args.vision_tower,
+        seg_token_idx=args.seg_token_idx,
+        **kwargs
+    )
+    
+    print(f"Loading weights from local file: {args.local_model}")
+    checkpoint = torch.load(args.local_model, map_location="cpu")
+    
+    # Handle different checkpoint formats
+    if isinstance(checkpoint, dict):
+        if 'model' in checkpoint:
+            checkpoint = checkpoint['model']
+        elif 'state_dict' in checkpoint:
+            checkpoint = checkpoint['state_dict']
+    
+    # Load weights
+    model.load_state_dict(checkpoint, strict=False)
+    print("Local weights loaded successfully")
+    
+    # Clean up memory
+    del checkpoint
+    torch.cuda.empty_cache()
 
 model.config.eos_token_id = tokenizer.eos_token_id
 model.config.bos_token_id = tokenizer.bos_token_id
@@ -186,13 +218,15 @@ output_labels = ["Segmentation Output"]
 
 title = "LISA: Reasoning Segmentation via Large Language Model"
 
-description = """
+# Update description based on model source
+model_desc = "using local model file" if args.local_model else "LISA-13B-llama2-v0-explanatory"
+description = f"""
 <font size=4>
 This is the online demo of LISA. \n
 If multiple users are using it at the same time, they will enter a queue, which may delay some time. \n
 **Note**: **Different prompts can lead to significantly varied results**. \n
 **Note**: Please try to **standardize** your input text prompts to **avoid ambiguity**, and also pay attention to whether the **punctuations** of the input are correct. \n
-**Note**: Current model is **LISA-13B-llama2-v0-explanatory**, and 4-bit quantization may impair text-generation quality. \n
+**Note**: Current model is **{model_desc}**, and 4-bit quantization may impair text-generation quality. \n
 **Usage**: <br>
 &ensp;(1) To let LISA **segment something**, input prompt like: "Can you segment xxx in this image?", "What is xxx in this image? Please output segmentation mask."; <br>
 &ensp;(2) To let LISA **output an explanation**, input prompt like: "What is xxx in this image? Please output segmentation mask and explain why."; <br>
@@ -337,4 +371,3 @@ demo = gr.Interface(
 
 demo.queue()
 demo.launch(share=True)
-
