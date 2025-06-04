@@ -12,8 +12,8 @@ out_image_folder_val = "processed_med_data/Kvasir-SEG/images/val"
 out_mask_folder_train  = "processed_med_data/Kvasir-SEG/masks/train"
 out_mask_folder_val  = "processed_med_data/Kvasir-SEG/masks/val"
 
-train_txt = "unpreocessed_med_data/kvasir-seg/train.txt"
-val_txt = "unpreocessed_med_data/kvasir-seg/val.txt"
+train_txt = "unprocessed_med_data/kvasir-seg/train.txt"
+val_txt   = "unprocessed_med_data/kvasir-seg/val.txt"
 
 # Ensure output directories exist
 for folder in [out_image_folder_train, out_image_folder_val,
